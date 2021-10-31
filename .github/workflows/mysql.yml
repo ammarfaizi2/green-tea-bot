@@ -1,0 +1,68 @@
+name: MySQL Wrapper
+
+on:
+  push:
+    paths:
+      - 'greentea/mysql/**'
+  pull_request:
+    paths:
+      - 'greentea/mysql/**'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cc: gcc
+            cxx: g++
+          - cc: clang
+            cxx: clang++
+
+    env:
+      CC: ${{matrix.cc}}
+      CXX: ${{matrix.cxx}}
+      TEST_MYSQL_HOST: 127.0.0.1
+      TEST_MYSQL_USER: mysql
+      TEST_MYSQL_PASSWORD: mysql
+      TEST_MYSQL_DBNAME: test_db
+
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v2
+
+    - name: Display software versions
+      run: |
+        ${{matrix.cc}} --version;
+        ${{matrix.cxx}} --version;
+        mysql --version;
+
+    - name: Install and Start MySQL server
+      run: |
+        sudo apt-get install mysql-server libmysqlclient21 libmysqlclient-dev -y;
+
+        printf "%s\n" "FLUSH PRIVILEGES;" >> /tmp/init_file;
+        printf "%s\n" "ALTER USER 'root'@'localhost' IDENTIFIED BY 'root123';" >> /tmp/init_file;
+        printf "%s\n" "CREATE USER IF NOT EXISTS '${{ env.TEST_MYSQL_USER }}'@'%' IDENTIFIED BY '${{ env.TEST_MYSQL_PASSWORD }}';" >> /tmp/init_file;
+        printf "%s\n" "CREATE DATABASE IF NOT EXISTS ${{ env.TEST_MYSQL_DBNAME }};" >> /tmp/init_file;
+        printf "%s\n" "GRANT ALL PRIVILEGES ON ${{ env.TEST_MYSQL_DBNAME }}.* TO '${{ env.TEST_MYSQL_USER }}'@'%';" >> /tmp/init_file;
+        sudo chmod -v 1777 /tmp /tmp/init_file;
+        sudo chown -v mysql:mysql /tmp/init_file;
+        sudo ls -l /tmp/init_file;
+        sudo cat /tmp/init_file;
+
+        sudo pkill -e mysqld || true;
+        sudo rm -rfv /var/run/mysqld;
+        sudo mkdir -pv /var/run/mysqld;
+        sudo chmod -v 777 /var/run/mysqld;
+        sudo /usr/sbin/mysqld --daemonize --bind-address=127.0.0.1 --init-file=/tmp/init_file || cat /var/log/mysql/error.log;
+        sudo ps aux | grep mysqld;
+        sudo netstat -ntlp;
+
+    - name: Run MySQL Tests
+      run: |
+        cd greentea/mysql && \
+        chmod +x runtests.sh && \
+        sudo --preserve-env ./runtests.sh;
