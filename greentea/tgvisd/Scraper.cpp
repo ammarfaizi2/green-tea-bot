@@ -346,6 +346,26 @@ public:
 			query_sync_timeout
 		);
 	}
+
+
+	inline td_api::object_ptr<td_api::messages> getChatHistory(
+				int64_t chat_id,
+				int64_t from_msg_id,
+				int32_t offset,
+				int32_t limit,
+				bool only_local = false)
+	{
+		return td_->send_query_sync<td_api::getChatHistory, td_api::messages>(
+			td_api::make_object<td_api::getChatHistory>(
+				chat_id,
+				from_msg_id,
+				offset,
+				limit,
+				only_local
+			),
+			query_sync_timeout
+		);
+	}
 };
 
 
@@ -390,6 +410,49 @@ static void wait_for_pool_assignment(uint32_t kwrk_id, KWorkerPool *kwrk_pool)
 }
 
 
+static void _scrape_chat_history(KWorker *kwrk,
+				 td_api::object_ptr<td_api::message> &msg)
+{
+	auto &content = msg->content_;
+
+	if (unlikely(!content))
+		return;
+
+	if (content->get_id() != td_api::messageText::ID)
+		return;
+
+	auto &text = static_cast<td_api::messageText &>(*content);
+	pr_notice("text = %s", text.text_->text_.c_str());
+}
+
+
+static void scrape_chat_history(KWorker *kwrk,
+				td_api::object_ptr<td_api::chat> &chat)
+{
+	int32_t i, count;
+
+	pr_notice("[tid=%d] Scraping %ld...", gettid(), chat->id_);
+
+	auto messages = kwrk->getChatHistory(chat->id_, 0, 0, 300);
+	if (unlikely(!messages)) {
+		pr_notice("[tid=%d] getChatHistory %ld is NULL", gettid(),
+			  chat->id_);
+		return;
+	}
+
+	count = messages->total_count_;
+	for (i = 0; i < count; i++) {
+		auto &msg = messages->messages_[i];
+		if (unlikely(!msg))
+			continue;
+
+		_scrape_chat_history(kwrk, msg);
+	}
+
+	pr_notice("[tid=%d] Scraping %ld finished", gettid(), chat->id_);
+}
+
+
 static void __run_kworker(uint32_t kwrk_id, KWorkerPool *kwrk_pool,
 			  KWorker *kwrk, struct task_work *tw)
 {
@@ -405,7 +468,7 @@ static void __run_kworker(uint32_t kwrk_id, KWorkerPool *kwrk_pool,
 	}
 
 	chatLock->lock();
-	pr_notice("[tid=%d] Scraping chat_id = %ld", gettid(), chat_id);
+	scrape_chat_history(kwrk, tw->chat);
 	chatLock->unlock();
 }
 
