@@ -25,6 +25,12 @@ class ChatContainer extends React.Component {
         });
     }
 
+    async fetchChatData(chat_id, limit = 10) {
+        let url = "https://greentea-api.teainside.org/api.php?action=get_chat_messages&group_id=" + chat_id + "&limit=" + limit;
+        let data = await fetch(url).then((res) => res.json());
+        this.state.chatBoxDataCache[chat_id] = data.msg.data;
+    }
+
     async fetchChatBoxData(chat_id, group_name, limit = 10) {
         if (chat_id in this.state.chatBoxDataCache) {
             this.setState({
@@ -36,9 +42,7 @@ class ChatContainer extends React.Component {
         }
 
         this.setState({ loadingChatBox: true });
-        let url = "https://greentea-api.teainside.org/api.php?action=get_chat_messages&group_id=" + chat_id + "&limit=" + limit;
-        let data = await fetch(url).then((res) => res.json());
-        this.state.chatBoxDataCache[chat_id] = data.msg.data;
+        await this.fetchChatData(chat_id, limit);
         this.setState({
             loadingChatBox: false,
             groupName: group_name,
