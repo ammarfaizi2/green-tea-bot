@@ -81,7 +81,9 @@ class Login extends React.Component {
                         <button type="submit" className="bg-dark-green text-white text-[20px] px-3 py-4 rounded-lg text-center cursor-pointer hover:bg-dark-green-1" href="/">
                             Login
                         </button>
-                        <a href="/register">Register</a>
+                        <a className="text-center text-green-800 text-lg" href="/register">
+                            Register
+                        </a>
                     </form>
                 </main>
             </div>
