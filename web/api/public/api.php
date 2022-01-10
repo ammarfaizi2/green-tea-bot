@@ -10,6 +10,7 @@ use GreenTea\API\Login;
 use GreenTea\API\GetGroupList;
 use GreenTea\API\GetChatMessages;
 use GreenTea\API\RegisterAccount;
+use GreenTea\API\GetMessageCountGroup;
 
 if (isset($_SERVER["HTTP_ORIGIN"]) && is_string($_SERVER["HTTP_ORIGIN"])) {
 	header("Access-Control-Allow-Origin: {$_SERVER["HTTP_ORIGIN"]}");
@@ -99,6 +100,28 @@ try {
 
 		$api = new Login();
 		$msg = $api->doLogin($_POST["email"], $_POST["pass"]);
+		if ($api->isError())
+			$code = $api->getErrorCode();
+		break;
+	case "get_msg_count_group":
+		$api = new GetMessageCountGroup();
+
+		if (isset($_GET["stats"])) {
+			if (!isset($_GET["start_date"]) || !is_string($_GET["start_date"])) {
+				$msg  = "Missing \"start_date\" string data";
+				$code = 400;
+				goto out;
+			}
+
+			if (!isset($_GET["end_date"]) || !is_string($_GET["end_date"]))
+				$_GET["end_date"] = date("Y-m-d");
+
+			$msg = $api->getCountStats($_GET["start_date"],
+						   $_GET["end_date"]);
+		} else {
+			$msg = $api->getCount();
+		}
+
 		if ($api->isError())
 			$code = $api->getErrorCode();
 		break;
