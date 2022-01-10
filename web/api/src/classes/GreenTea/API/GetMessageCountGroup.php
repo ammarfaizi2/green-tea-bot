@@ -60,7 +60,7 @@ SQL;
 			$data[date("Y-m-d", $epStartDate)] = 0;
 			$epStartDate += 3600 * 24;
 		}
-		var_dump($startDate, $endDate);
+
 		$query = <<<SQL
 			SELECT
 			DATE(tg_date) AS msg_date, COUNT(1) AS nr_msg
