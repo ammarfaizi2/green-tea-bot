@@ -105,7 +105,23 @@ try {
 		break;
 	case "get_msg_count_group":
 		$api = new GetMessageCountGroup();
-		$msg = $api->getCount();
+
+		if (isset($_GET["stats"])) {
+			if (!isset($_GET["start_date"]) || !is_string($_GET["start_date"])) {
+				$msg  = "Missing \"start_date\" string data";
+				$code = 400;
+				goto out;
+			}
+
+			if (!isset($_GET["end_date"]) || !is_string($_GET["end_date"]))
+				$_GET["end_date"] = date("Y-m-d");
+
+			$msg = $api->getCountStats($_GET["start_date"],
+						   $_GET["end_date"]);
+		} else {
+			$msg = $api->getCount();
+		}
+
 		if ($api->isError())
 			$code = $api->getErrorCode();
 		break;

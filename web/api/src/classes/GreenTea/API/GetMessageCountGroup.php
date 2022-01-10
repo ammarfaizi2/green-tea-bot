@@ -41,6 +41,48 @@ SQL;
 		];
 	}
 
+	public function getCountStats(string $startDate, ?string $endDate = NULL): array
+	{
+		$data = [];
+
+		if ($endDate) {
+			$epEndDate = strtotime($endDate);
+			$endDate = date("Y-m-d", $epEndDate)." 23:59:59";
+		} else {
+			$endDate = date("Y-m-d")." 23:59:59";
+			$epEndDate = time();
+		}
+
+		$origEpStartDate = strtotime($startDate);
+		$startDate = date("Y-m-d", $origEpStartDate)." 00:00:00";
+		$epStartDate = $origEpStartDate;
+		while ($epStartDate <= $epEndDate) {
+			$data[date("Y-m-d", $epStartDate)] = 0;
+			$epStartDate += 3600 * 24;
+		}
+		var_dump($startDate, $endDate);
+		$query = <<<SQL
+			SELECT
+			DATE(tg_date) AS msg_date, COUNT(1) AS nr_msg
+			FROM gt_message_content
+			WHERE tg_date >= ? AND tg_date <= ?
+			GROUP BY msg_date
+			ORDER BY msg_date DESC
+SQL;
+		$pdo = $this->getPDO();
+		$st = $pdo->prepare($query);
+		$st->execute([$startDate, $endDate]);
+		$this->errorCode = 0;
+		while ($r = $st->fetch(PDO::FETCH_ASSOC))
+			$data[$r["msg_date"]] = (int) $r["nr_msg"];
+
+		return [
+			"is_ok" => true,
+			"msg"   => NULL,
+			"data"  => $data,
+		];
+	}
+
 	/**
 	 * @return int
 	 */
