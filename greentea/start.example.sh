@@ -1,0 +1,10 @@
+#!/bin/sh
+export TGVISD_API_ID=
+export TGVISD_API_HASH=
+export TGVISD_DATA_PATH=accounts/628123456789
+export TGVISD_MYSQL_HOST=127.0.0.1
+export TGVISD_MYSQL_USER=root
+export TGVISD_MYSQL_PASS=123123
+export TGVISD_MYSQL_DBNAME=greentea
+export TGVISD_MYSQL_PORT=3306
+build/tgvisd/tgvisd
