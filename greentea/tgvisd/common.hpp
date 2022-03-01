@@ -17,6 +17,11 @@
 #include <cstdint>
 #include <cstdbool>
 
+#ifndef TASK_COMM_LEN
+	#define TASK_COMM_LEN			16
+#endif
+
+
 #ifndef __must_hold
 	#define __must_hold(MUTEX)
 #endif
@@ -60,7 +65,20 @@
 	})
 #endif
 
+static inline int PTR_ERR(const void *ptr)
+{
+	return (int) (intptr_t) ptr;
+}
 
+static inline void *ERR_PTR(int err)
+{
+	return (void *) (intptr_t) err;
+}
+
+static inline bool IS_ERR(const void *ptr)
+{
+	return unlikely((uintptr_t) ptr >= (uintptr_t) -4095UL);
+}
 
 static __always_inline void cpu_relax(void)
 {

@@ -5,508 +5,349 @@
  * @package tgvisd
  *
  * Copyright (C) 2021 Ammar Faizi <ammarfaizi2@gmail.com>
+ * Copyright (C) 2022 Alviro Iskandar Setiawan <alviro.iskandar@gnuweeb.org>
  */
-#if defined(__linux__)
-	#include <unistd.h>
-	#include <pthread.h>
-#endif
 
-#include <stack>
-#include <mutex>
-#include <queue>
 #include <chrono>
-#include <cstdio>
-#include <cstring>
-#include <cassert>
-#include <cstdlib>
-#include <unordered_map>
-#include <mysql/MySQL.hpp>
-#include <tgvisd/common.hpp>
-#include <condition_variable>
 #include <tgvisd/KWorker.hpp>
-
 
 namespace tgvisd {
 
-
+using std::chrono::duration;
 using namespace std::chrono_literals;
 
+#define	NR_MAX_THPOOL	64
+#define NR_MAX_WQ	512
 
-__cold KWorker::KWorker(Main *main, uint32_t maxThPool, uint32_t maxDbPool,
-			uint32_t maxNRTasks):
-	td_(main->getTd()),
-	main_(main),
-	maxThPool_(maxThPool),
-	maxNRTasks_(maxNRTasks),
-	activeThPool_(0)
+KWorker::KWorker(Main *main):
+	main_(main)
 {
 	uint32_t i;
 
-	initMySQLConfig();
+	wq_     = new struct wq[NR_MAX_WQ];
+	thPool_ = new struct thpool[NR_MAX_THPOOL];
 
-	thPool_ = new thpool[maxThPool];
-	dbPool_ = new dbpool[maxDbPool];
-
-	for (i = maxThPool; i--;) {
-		thPool_[i].idx  = i;
-		thPool_[i].stop = false;
+	for (i = NR_MAX_THPOOL; i--;) {
+		thPool_[i].idx = i;
 		thPoolStk_.push(i);
 	}
 
-	for (i = maxDbPool; i--;) {
-		dbPool_[i].idx = i;
-		dbPoolStk_.push(i);
-	}
-
-	tasks_ = new task_work[maxNRTasks];
-	for (i = maxNRTasks; i--;) {
-		tasks_[i].idx = i;
-		freeTask_.push(i);
+	for (i = NR_MAX_WQ; i--;) {
+		wq_[i].idx = i;
+		wqStk_.push(i);
 	}
 }
 
-
-__hot int KWorker::submitTaskWork(struct task_work *tw)
-	__acquires(&taskLock_)
-	__releases(&taskLock_)
-{
-	uint32_t idx;
-
-	taskLock_.lock();
-	if (unlikely(tasks_ == nullptr) || freeTask_.empty()) {
-		taskLock_.unlock();
-		return -EAGAIN;
-	}
-	idx = freeTask_.top();
-	freeTask_.pop();
-	tasks_[idx] = std::move(*tw);
-	tasks_[idx].idx = idx;
-	tasksQueue_.push(idx);
-	taskLock_.unlock();
-
-	if (activeThPool_.load() <= tasksQueue_.size())
-		masterCond_.notify_one();
-	else
-		taskCond_.notify_one();
-
-	return 0;
-}
-
-
-void KWorker::putDbPool(mysql::MySQL *db)
-	__acquires(&dbPoolLock_)
-	__releases(&dbPoolLock_)
-{
-	struct dbpool *dbp;
-
-	dbp = container_of(db, struct dbpool, db);
-	dbPoolLock_.lock();
-	dbPoolStk_.push(dbp->idx);
-	dbPoolLock_.unlock();
-}
-
-
-mysql::MySQL *KWorker::getDbPool(void)
-	__acquires(&dbPoolLock_)
-	__releases(&dbPoolLock_)
-{
-	uint32_t idx;
-	mysql::MySQL *ret;
-
-	dbPoolLock_.lock();
-	if (unlikely(dbPool_ == nullptr) || dbPoolStk_.empty()) {
-		dbPoolLock_.unlock();
-		return nullptr;
-	}
-	idx = dbPoolStk_.top();
-	dbPoolStk_.pop();
-	dbPoolLock_.unlock();
-
-	ret = &dbPool_[idx].db;
-	if (!ret->getConn()) {
-		ret->init(sqlHost_, sqlUser_, sqlPass_, sqlDBName_);
-		ret->setPort(sqlPort_);
-		ret->connect();
-	}
-	return ret;
-}
-
-
-struct task_work *KWorker::getTaskWork(void)
-	__acquires(&taskLock_)
-	__releases(&taskLock_)
-{
-	uint32_t idx;
-	struct task_work *ret;
-
-	taskLock_.lock();
-	if (unlikely(tasks_ == nullptr) || tasksQueue_.empty()) {
-		taskLock_.unlock();
-		return nullptr;
-	}
-	idx = tasksQueue_.front();
-	tasksQueue_.pop();
-	ret = &tasks_[idx];
-	taskLock_.unlock();
-
-	if (unlikely(ret->idx != idx)) {
-		panic("Bug ret->idx != idx");
-		__builtin_unreachable();
-	}
-	return ret;
-}
-
-
-void KWorker::putTaskWork(struct task_work *tw)
-	__acquires(&taskLock_)
-	__releases(&taskLock_)
-{
-	taskLock_.lock();
-	freeTask_.push(tw->idx);
-	taskLock_.unlock();
-	taskPutCond_.notify_one();
-}
-
-
-struct thpool *KWorker::getThPool(void)
-	__acquires(&thPoolLock_)
-	__releases(&thPoolLock_)
-{
-	uint32_t idx;
-	struct thpool *ret;
-
-	thPoolLock_.lock();
-	if (unlikely(thPool_ == nullptr) || thPoolStk_.empty()) {
-		thPoolLock_.unlock();
-		return nullptr;
-	}
-	idx = thPoolStk_.top();
-	thPoolStk_.pop();
-	thPoolLock_.unlock();
-
-	ret = &thPool_[idx];
-	if (unlikely(ret->thread)) {
-		panic("ret->thread is not NULL!");
-		__builtin_unreachable();
-	}
-
-	ret->thread = new std::thread([this, ret]{
-		this->runThreadPool(ret);
-	});
-	ret->setInterruptible();
-	return ret;
-}
-
-
-void KWorker::runThreadPool(struct thpool *pool)
-	__acquires(&taskLock_)
-	__releases(&taskLock_)
-	__acquires(&joinQueueLock_)
-	__releases(&joinQueueLock_)
-{
-	uint32_t idle_c = 0;
-	struct task_work *tw;
-	std::unique_lock<std::mutex> lk(taskLock_, std::defer_lock);
-
-	activeThPool_++;
-	while (!(pool->stop || shouldStop())) {
-		struct tw_data data;
-
-		tw = getTaskWork();
-		if (!tw) {
-			lk.lock();
-			auto cvret = taskCond_.wait_for(lk, 5000ms);
-			lk.unlock();
-
-			if (cvret != std::cv_status::timeout)
-				continue;
-			if (++idle_c < 10)
-				continue;
-			goto idle_exit;
-		}
-
-		if (unlikely(!tw->func)) {
-			putTaskWork(tw);
-			continue;
-		}
-
-		data.tw = tw;
-		data.kwrk = this;
-		data.current = pool;
-		pool->setUninterruptible();
-		tw->func(&data);
-		if (tw->deleter) {
-			tw->deleter(tw->payload);
-			tw->deleter = nullptr;
-		}
-		tw->payload = nullptr;
-		putTaskWork(tw);
-		pool->setInterruptible();
-		idle_c = 0;
-	}
-
-out:
-	joinQueueLock_.lock();
-	joinQueue_.push(pool->idx);
-	joinQueueLock_.unlock();
-	masterCond_.notify_one();
-
-	activeThPool_--;
-	return;
-
-idle_exit:
-	pr_notice("tgvkwrk-%u is exiting due to inactivity...", pool->idx);
-	goto out;
-}
-
-
-void KWorker::handleJoinQueue(void)
-	__acquires(&joinQueueLock_)
-	__releases(&joinQueueLock_)
-{
-	joinQueueLock_.lock();
-	while (!joinQueue_.empty()) {
-		uint32_t idx;
-
-		idx = joinQueue_.front();
-		joinQueue_.pop();
-		joinQueueLock_.unlock();
-
-		thPoolLock_.lock();
-		if (thPool_) {
-			pr_notice("tgvkwrk-master: Joining tgvkwrk-%u...", idx);
-			thPool_[idx].stop = true;
-			thPool_[idx].thread->join();
-			delete thPool_[idx].thread;
-			thPool_[idx].thread = nullptr;
-			thPoolStk_.push(idx);
-		}
-		thPoolLock_.unlock();
-
-		joinQueueLock_.lock();
-	}
-	joinQueueLock_.unlock();
-}
-
-
-std::mutex *KWorker::getChatLock(int64_t tg_chat_id)
-	__acquires(&clmLock_)
-	__releases(&clmLock_)
-{
-	std::mutex *ret;
-
-	if (unlikely(dropChatLock_ || shouldStop()))
-		return nullptr;
-
-	clmLock_.lock();
-	const auto &it = chatLockMap_.find(tg_chat_id);
-	if (it == chatLockMap_.end()) {
-		ret = new std::mutex;
-		chatLockMap_.emplace(tg_chat_id, ret);
-	} else {
-		ret = it->second;
-	}
-	clmLock_.unlock();
-	return ret;
-}
-
-
-std::mutex *KWorker::getUserLock(int64_t tg_user_id)
-	__acquires(&ulmLock_)
-	__releases(&ulmLock_)
-{
-	std::mutex *ret;
-
-	if (unlikely(dropChatLock_ || shouldStop()))
-		return nullptr;
-
-	ulmLock_.lock();
-	const auto &it = userLockMap_.find(tg_user_id);
-	if (it == userLockMap_.end()) {
-		ret = new std::mutex;
-		userLockMap_.emplace(tg_user_id, ret);
-	} else {
-		ret = it->second;
-	}
-	ulmLock_.unlock();
-	return ret;
-}
-
-
-void KWorker::runMasterKWorker(void)
-	__acquires(&taskLock_)
-	__releases(&taskLock_)
-{
-	std::unique_lock<std::mutex> lk(taskLock_, std::defer_lock);
-
-	while (!shouldStop()) {
-		uint32_t act_thread, num_of_queues;
-
-		lk.lock();
-		masterCond_.wait_for(lk, 10000ms);
-		lk.unlock();
-
-		handleJoinQueue();
-
-		act_thread    = activeThPool_.load();
-		num_of_queues = tasksQueue_.size();
-
-		if (num_of_queues >= act_thread && act_thread < maxThPool_) {
-			uint32_t i, loop_c;
-
-			loop_c = num_of_queues - act_thread;
-			if (loop_c > maxThPool_)
-				loop_c = maxThPool_;
-
-			for (i = 0; i < loop_c; i++)
-				getThPool();
-
-			taskCond_.notify_all();
-		} else {
-			taskCond_.notify_one();
-		}
-	}
-}
-
-
-__cold void KWorker::initMySQLConfig(void)
-{
-	const char *tmp;
-
-	sqlHost_ = getenv("TGVISD_MYSQL_HOST");
-	if (unlikely(!sqlHost_))
-		throw std::runtime_error("Missing TGVISD_MYSQL_HOST env");
-
-	sqlUser_ = getenv("TGVISD_MYSQL_USER");
-	if (unlikely(!sqlUser_))
-		throw std::runtime_error("Missing TGVISD_MYSQL_USER env");
-
-	sqlPass_ = getenv("TGVISD_MYSQL_PASS");
-	if (unlikely(!sqlPass_))
-		throw std::runtime_error("Missing TGVISD_MYSQL_PASS env");
-
-	sqlDBName_ = getenv("TGVISD_MYSQL_DBNAME");
-	if (unlikely(!sqlDBName_))
-		throw std::runtime_error("Missing TGVISD_MYSQL_DBNAME env");
-
-	tmp = getenv("TGVISD_MYSQL_PORT");
-	if (unlikely(!tmp))
-		throw std::runtime_error("Missing TGVISD_MYSQL_PORT env");
-
-	sqlPort_ = (uint16_t)atoi(tmp);
-}
-
-
-__cold void KWorker::cleanUp(void)
+KWorker::~KWorker(void)
+	__acquires(&wqStkLock_)
+	__releases(&wqStkLock_)
+	__acquires(&pendingWqLock_)
+	__releases(&pendingWqLock_)
 {
 	uint32_t i;
 
-	dropChatLock_ = true;
-	dropUserLock_ = true;
+	stop();
+	waitForKWorker();
+	wqStkLock_.lock();
+	pendingWqLock_.lock();
+
+	if (wq_) {
+		delete[] wq_;
+		wq_ = nullptr;
+	}
 
 	if (thPool_) {
-		joinQueueLock_.lock();
-		thPoolLock_.lock();
-		for (i = 0; i < maxThPool_; i++) {
-			if (thPool_[i].thread)
-				thPool_[i].stop = true;
-		}
-		thPoolLock_.unlock();
-		joinQueueLock_.unlock();
-		taskCond_.notify_all();
+		for (i = NR_MAX_THPOOL; i--;) {
+			std::thread *t = atomic_load(&thPool_[i].thread);
 
-		thPoolLock_.lock();
-		for (i = 0; i < maxThPool_; i++) {
-			if (thPool_[i].thread) {
-				thPool_[i].thread->join();
-				delete thPool_[i].thread;
-				thPool_[i].thread = nullptr;
-			}
+			if (!t)
+				continue;
+			t->join();
+			delete t;
 		}
+
 		delete[] thPool_;
 		thPool_ = nullptr;
-		thPoolLock_.unlock();
 	}
 
-
-	if (masterTh_) {
-		masterCond_.notify_all();
-		masterTh_->join();
-		delete masterTh_;
-		masterTh_ = nullptr;
-	}
-
-
-	if (dbPool_) {
-		delete[] dbPool_;
-		dbPool_ = nullptr;
-	}
-
-	if (tasks_) {
-		for (i = 0; i < maxNRTasks_; i++) {
-			struct task_work *tw;
-
-			tw = &tasks_[i];
-			if (tw->deleter) {
-				tw->deleter(tw->payload);
-				tw->deleter = nullptr;
-			}
-			tw->payload = nullptr;
-		}
-		delete[] tasks_;
-		tasks_ = nullptr;
-	}
-
-	clmLock_.lock();
-	for (auto &i: chatLockMap_) {
-		std::mutex *mut;
-		mut = i.second;
-		mut->lock();
-		mut->unlock();
-		delete mut;
-		i.second = nullptr;
-	}
-	clmLock_.unlock();
-
-	ulmLock_.lock();
-	for (auto &i: userLockMap_) {
-		std::mutex *mut;
-		mut = i.second;
-		mut->lock();
-		mut->unlock();
-		delete mut;
-		i.second = nullptr;
-	}
-	ulmLock_.unlock();
+	wqStkLock_.unlock();
+	pendingWqLock_.unlock();
 }
 
+void KWorker::waitForKWorker(void)
+{
+	while (1) {
+		uint32_t n = atomic_load(&NrThPoolOnline_);
+		if (n == 0)
+			break;
 
-void thpool::setInterruptible(void)
+		pr_notice("Waiting for %u kworker(s)...", n);
+		sleep(1);
+	}
+}
+
+int KWorker::scheduleWq(wq_f_t func, void *udata, wq_udata_del_f_t fdel)
+	__acquires(&wqStkLock_)
+	__releases(&wqStkLock_)
+	__acquires(&pendingWqLock_)
+	__releases(&pendingWqLock_)
+{
+	struct wq *wq;
+	uint32_t idx;
+	int ret;
+
+	wqStkLock_.lock();
+	ret = -EOWNERDEAD;
+	if (shouldStop())
+		goto out;
+	if (unlikely(!wq_))
+		goto out;
+	ret = -EAGAIN;
+	if (unlikely(wqStk_.empty()))
+		goto out;
+	idx = wqStk_.top();
+	wqStk_.pop();
+
+	wq = &wq_[idx];
+	wq->is_done = false;
+	wq->func = std::move(func);
+	wq->data.kwrk = this;
+	wq->data.current = nullptr; /* Filled by the kworker master. */
+	wq->data.user_data = udata;
+	wq->data.user_data_deleter = std::move(fdel);
+	assert(wq->idx == idx);
+
+	pendingWqLock_.lock();
+	pendingWq_.push(idx);
+	pendingWqLock_.unlock();
+	wqCond_.notify_one();
+	ret = 0;
+out:
+	wqStkLock_.unlock();
+	return ret;
+}
+
+void KWorker::waitForFreeWqSlot(int timeout)
+	__acquires(&wqFreeLock_)
+	__releases(&wqFreeLock_)
+{
+	atomic_fetch_add(&nrFreeWqSlotRequests_, 1);
+	std::unique_lock lk(wqFreeLock_);
+	wqCondFree_.wait_for(lk, std::chrono::milliseconds(timeout));
+	atomic_fetch_sub(&nrFreeWqSlotRequests_, 1);
+}
+
+void KWorker::putWq(uint32_t idx)
+	__acquires(&wqStkLock_)
+	__releases(&wqStkLock_)
+{
+	wqStkLock_.lock();
+	wqStk_.push(idx);
+	wqStkLock_.unlock();
+}
+
+void KWorker::putThPool(uint32_t idx)
+	__acquires(&thPoolStkLock_)
+	__releases(&thPoolStkLock_)
+{
+	atomic_store(&thPool_[idx].wq, nullptr);
+	thPoolStkLock_.lock();
+	thPoolStk_.push(idx);
+	thPoolStkLock_.unlock();
+}
+
+void KWorker::threadPoolWrk(struct thpool *thpool)
+	__acquires(&thpool->mutex)
+	__releases(&thpool->mutex)
+{
+	std::unique_lock<std::mutex> lk(thpool->mutex);
+	const uint32_t max_idle_c = 10;
+	uint32_t idle_c = 0;
+	struct wq *wq;
+
+	atomic_fetch_add(&NrThPoolOnline_, 1);
+	atomic_store(&thpool->is_online, true);
+
+loop:
+	if (shouldStop())
+		goto out;
+
+	wq = atomic_load(&thpool->wq);
+	if (!wq) {
+
+		/*
+		 * Idle waiting for workqueue.
+		 *
+		 * If in @max_idle_c seconds we don't get any workqueue,
+		 * stop this thread pool.
+		 */
+
+		if (idle_c >= max_idle_c)
+			goto out;
+
+		auto cret = thpool->cond.wait_for(lk, 1000ms);
+		if (cret == std::cv_status::timeout)
+			idle_c++;
+
+		goto loop;
+	}
+
+	idle_c = 0;
+	thpool->setUninterruptible();
+	if (!wq->func)
+		goto do_put;
+
+	wq->func(&wq->data);
+	if (wq->data.user_data && wq->data.user_data_deleter)
+		wq->data.user_data_deleter(wq->data.user_data);
+
+	wq->func = nullptr;
+	wq->is_done = true;
+	wq->data.user_data = nullptr;
+	wq->data.user_data_deleter = nullptr;
+
+do_put:
+	putWq(wq->idx);
+	putThPool(thpool->idx);
+	thpool->setInterruptible();
+	wqCond_.notify_one();
+
+	/*
+	 * Workqueue is/was full and someone is waiting
+	 * for the free wq slot. Let them know that we
+	 * now have at least one available free wq slot.
+	 */
+	if (atomic_load(&nrFreeWqSlotRequests_) > 0)
+		wqCondFree_.notify_one();
+
+	goto loop;
+
+out:
+	atomic_fetch_sub(&NrThPoolOnline_, 1);
+	atomic_store(&thpool->is_online, false);
+}
+
+struct thpool *KWorker::getThPool(void)
+	__acquires(&thPoolStkLock_)
+	__releases(&thPoolStkLock_)
+{
+	struct thpool *ret = nullptr;
+	std::thread *t;
+	uint32_t idx;
+
+	thPoolStkLock_.lock();
+	if (shouldStop())
+		goto out;
+	if (unlikely(thPool_ == nullptr || thPoolStk_.empty()))
+		goto out;
+	idx = thPoolStk_.top();
+	thPoolStk_.pop();
+
+	ret = &thPool_[idx];
+	assert(atomic_load(&ret->wq) == nullptr);
+	assert(atomic_load(&ret->thread) == nullptr);
+
+	ret->mutex.lock();
+	if (!ret->thpool_is_online()) {
+		t = atomic_load(&ret->thread);
+		if (t) {
+			t->join();
+			delete t;
+		}
+
+		t = new std::thread([this, ret](void){
+			this->threadPoolWrk(ret);
+		});
+		atomic_store(&ret->thread, t);
+	}
+	ret->mutex.unlock();
+out:
+	thPoolStkLock_.unlock();
+	return ret;
+}
+
+int KWorker::dispatchWq(uint32_t idx)
+	__must_hold(&pendingWqLock_)
+{
+	struct thpool *thpool;
+	struct wq *wq;
+
+	if (shouldStop())
+		return -EOWNERDEAD;
+
+	thpool = getThPool();
+	if (unlikely(!thpool))
+		return -EAGAIN;
+
+	assert(thpool->wq == nullptr);
+
+	wq = &wq_[idx];
+	wq->data.current = thpool;
+	atomic_store(&thpool->wq, wq);
+	thpool->cond.notify_one();
+	return 0;
+}
+
+static void setKWorkerMasterThreadName(void)
 {
 #if defined(__linux__)
-	pthread_t pt;
-	char buf[sizeof("tgvkwrk-xxxxxxxxx")];
-	if (unlikely(!this->thread))
+	pthread_setname_np(pthread_self(), "tgvkwrk-master");
+#endif
+}
+
+void KWorker::run(void)
+	__acquires(&pendingWqLock_)
+	__releases(&pendingWqLock_)
+{
+	setKWorkerMasterThreadName();
+	std::unique_lock<std::mutex> lk(pendingWqLock_);
+loop:
+	if (shouldStop())
 		return;
-	pt = this->thread->native_handle();
+
+	wqCond_.wait_for(lk, 2000ms);
+	while (!pendingWq_.empty()) {
+		if (dispatchWq(pendingWq_.front()))
+			break;
+		pendingWq_.pop();
+	}
+	goto loop;
+}
+
+void thpool::__setInterruptible(void)
+{
+#if defined(__linux__)
+	char buf[TASK_COMM_LEN];
+	std::thread *t;
+	pthread_t pt;
+
+	t = atomic_load(&this->thread);
+	if (unlikely(!t))
+		return;
+
+	is_interruptible = true;
+	pt = t->native_handle();
 	snprintf(buf, sizeof(buf), "tgvkwrk-%u", idx);
 	pthread_setname_np(pt, buf);
 #endif
 }
 
-
-void thpool::setUninterruptible(void)
+void thpool::__setUninterruptible(void)
 {
 #if defined(__linux__)
+	char buf[TASK_COMM_LEN];
+	std::thread *t;
 	pthread_t pt;
-	char buf[sizeof("tgvkwrk-D-xxxxxxxxx")];
-	if (unlikely(!this->thread))
+
+	t = atomic_load(&this->thread);
+	if (unlikely(!t))
 		return;
-	pt = this->thread->native_handle();
+
+	is_interruptible = false;
+	pt = t->native_handle();
 	snprintf(buf, sizeof(buf), "tgvkwrk-D-%u", idx);
 	pthread_setname_np(pt, buf);
 #endif
 }
-
 
 } /* namespace tgvisd */

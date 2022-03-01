@@ -5,6 +5,7 @@
  * @package tgvisd
  *
  * Copyright (C) 2021 Ammar Faizi <ammarfaizi2@gmail.com>
+ * Copyright (C) 2022 Alviro Iskandar Setiawan <alviro.iskandar@gnweeb.org>
  */
 
 #ifndef TGVISD__KWORKER_HPP
@@ -15,240 +16,116 @@
 	#include <pthread.h>
 #endif
 
-#include <stack>
-#include <mutex>
-#include <queue>
-#include <chrono>
-#include <cstdio>
-#include <cstring>
-#include <cassert>
-#include <cstdlib>
-#include <functional>
-#include <unordered_map>
-#include <mysql/MySQL.hpp>
-#include <tgvisd/Main.hpp>
-#include <tgvisd/Td/Td.hpp>
-#include <tgvisd/common.hpp>
 #include <condition_variable>
-
+#include <tgvisd/common.hpp>
+#include <tgvisd/Main.hpp>
+#include <functional>
+#include <thread>
+#include <atomic>
+#include <stack>
+#include <queue>
+#include <mutex>
 
 namespace tgvisd {
 
-
-using std::chrono::duration;
-using namespace std::chrono_literals;
-
-
+struct wq;
 class KWorker;
 
-
 struct thpool {
-	volatile bool				stop    = false;
-	std::thread				*thread = nullptr;
-	uint32_t				idx;
+	std::condition_variable		cond;
+	std::mutex			mutex;
+	std::atomic<std::thread *>	thread;
+	std::atomic<struct wq *>	wq;
+	uint32_t			idx;
+	std::atomic<bool>		is_online = false;
+	bool				is_interruptible = true;
 
-	void setInterruptible(void);
-	void setUninterruptible(void);
+	inline bool thpool_is_online(void)
+	{
+		return atomic_load(&is_online);
+	}
+	void __setInterruptible(void);
+	void __setUninterruptible(void);
+
+	inline void setInterruptible(void)
+	{
+		if (!is_interruptible)
+			__setInterruptible();
+	}
+
+	inline void setUninterruptible(void)
+	{
+		if (is_interruptible)
+			__setUninterruptible();
+	}
 };
 
+typedef std::function<void(void *user_data)> wq_udata_del_f_t;
 
-struct dbpool {
-	mysql::MySQL				db;
-	uint32_t				idx;
+struct wq_data {
+	KWorker			*kwrk      = nullptr;
+	struct thpool		*current   = nullptr;
+	void			*user_data = nullptr;
+	wq_udata_del_f_t	user_data_deleter = nullptr;
 };
 
+typedef std::function<void(const struct wq_data *data)> wq_f_t;
 
-struct tw_data {
-	struct task_work			*tw;
-	KWorker					*kwrk;
-	struct thpool				*current;
+struct wq {
+	bool		is_done = false;
+	wq_f_t		func    = nullptr;
+	struct wq_data	data;
+	uint32_t	idx;
 };
 
+class KWorker {
 
-struct task_work {
-	std::function<void(tw_data *data)>	func    = nullptr;
-	std::function<void(void *payload)>	deleter = nullptr;
-	void					*payload;
-	uint32_t				idx;
-};
-
-
-class KWorker
-{
 private:
-	volatile bool		stop_          = false;
-	volatile bool		dropChatLock_  = false;
-	volatile bool		dropUserLock_  = false;
-	tgvisd::Td::Td		*td_           = nullptr;
-	Main			*main_         = nullptr;
-	struct thpool		*thPool_       = nullptr;
-	struct dbpool		*dbPool_       = nullptr;
-	std::thread		*masterTh_     = nullptr;
-	struct task_work	*tasks_        = nullptr;
-	uint32_t		maxThPool_     = 32;
-	uint32_t		maxNRTasks_    = 0;
-	std::atomic<uint32_t>	activeThPool_  = 0;
+	volatile bool		stop_		= false;
+	Main			*main_		= nullptr;
+	struct thpool		*thPool_	= nullptr;
+	struct wq		*wq_		= nullptr;
 
-	std::condition_variable masterCond_;
-	std::mutex		thPoolLock_;
+	std::mutex		thPoolStkLock_;
 	std::stack<uint32_t>	thPoolStk_;
-	std::mutex		dbPoolLock_;
-	std::stack<uint32_t>	dbPoolStk_;
-
-	std::condition_variable taskPutCond_;
-	std::condition_variable	taskCond_;
-	std::mutex		taskLock_;
-	std::stack<uint32_t>	freeTask_;
-	std::queue<uint32_t>	tasksQueue_;
-
-	std::mutex		joinQueueLock_;
-	std::queue<uint32_t>	joinQueue_;
-
-	std::mutex					clmLock_;
-	std::unordered_map<int64_t, std::mutex *>	chatLockMap_;
-
-	std::mutex					ulmLock_;
-	std::unordered_map<int64_t, std::mutex *>	userLockMap_;
-
-	const char		*sqlHost_   = nullptr;
-	const char		*sqlUser_   = nullptr;
-	const char		*sqlPass_   = nullptr;
-	const char		*sqlDBName_ = nullptr;
-	uint16_t		sqlPort_    = 0u;
-
-	void cleanUp(void);
-	void runMasterKWorker(void);
-	void handleJoinQueue(void);
-	void runThreadPool(struct thpool *pool);
-	struct task_work *getTaskWork(void);
-	struct thpool *getThPool(void);
-	void putTaskWork(struct task_work *tw);
-	void initMySQLConfig(void);
-
+	std::mutex		wqStkLock_;
+	std::stack<uint32_t>	wqStk_;
+	std::mutex		pendingWqLock_;
+	std::queue<uint32_t>	pendingWq_;
+	std::condition_variable	wqCond_;
+	std::mutex		wqFreeLock_;
+	std::condition_variable	wqCondFree_;
+	std::atomic<uint32_t>	NrThPoolOnline_ = 0;
+	std::atomic<uint32_t>	nrFreeWqSlotRequests_ = 0;
 public:
-	inline ~KWorker(void)
-	{
-		cleanUp();
-	}
-
-
-	KWorker(Main *main, uint32_t maxThPool = 16, uint32_t maxDbPool = 256,
-		uint32_t maxNRTasks = 512);
-	int submitTaskWork(struct task_work *tw);
-	mysql::MySQL *getDbPool(void);
-	void putDbPool(mysql::MySQL *db);
-	std::mutex *getChatLock(int64_t tg_chat_id);
-	std::mutex *getUserLock(int64_t tg_user_id);
-
-
-	template<class Rep, class Period>
-	inline void waitQueue(const duration<Rep, Period> &rel_time)
-	{
-		std::unique_lock<std::mutex> lk(taskLock_);
-		taskPutCond_.wait_for(lk, rel_time);
-	}
-
-
-	inline bool shouldStop(void)
-	{
-		return unlikely(stop_ || main_->getStop());
-	}
-
-
-	inline void run(void)
-	{
-		runMasterKWorker();
-	}
-
-
 	inline void stop(void)
 	{
 		stop_ = true;
-		taskCond_.notify_all();
-		masterCond_.notify_all();
-		taskPutCond_.notify_all();
 	}
 
-
-	inline Main *getMain(void)
+	inline bool shouldStop(void)
 	{
-		return main_;
+		return unlikely(stop_ || main_->shouldStop());
 	}
 
+	KWorker(Main *main);
+	~KWorker(void);
 
-	inline tgvisd::Td::Td *getTd(void)
-	{
-		return td_;
-	}
+	int scheduleWq(wq_f_t func, void *udata = nullptr,
+		       wq_udata_del_f_t fdel = nullptr);
+	void waitForFreeWqSlot(int timeout);
 
+	void run(void);
 
-	inline static void setMasterThreadName(std::thread *task)
-	{
-#if defined(__linux__)
-		pthread_t pt = task->native_handle();
-		pthread_setname_np(pt, "tgvkwrk-master");
-#endif
-	}
-
-
-	static constexpr uint32_t query_sync_timeout = 150;
-
-
-	inline td_api::object_ptr<td_api::chats> getChats(
-		td_api::object_ptr<td_api::ChatList> &&chatList, int32_t limit)
-	{
-		return td_->send_query_sync<td_api::getChats, td_api::chats>(
-			td_api::make_object<td_api::getChats>(
-				std::move(chatList),
-				limit
-			),
-			query_sync_timeout
-		);
-	}
-
-
-	inline td_api::object_ptr<td_api::chat> getChat(int64_t chat_id)
-	{
-		return td_->send_query_sync<td_api::getChat, td_api::chat>(
-			td_api::make_object<td_api::getChat>(chat_id),
-			query_sync_timeout
-		);
-	}
-
-
-	inline td_api::object_ptr<td_api::messages> getChatHistory(
-				int64_t chat_id,
-				int64_t from_msg_id,
-				int32_t offset,
-				int32_t limit,
-				bool only_local = false,
-				td_api::object_ptr<td_api::error> *err = nullptr)
-	{
-		return td_->send_query_sync<td_api::getChatHistory, td_api::messages>(
-			td_api::make_object<td_api::getChatHistory>(
-				chat_id,
-				from_msg_id,
-				offset,
-				limit,
-				only_local
-			),
-			query_sync_timeout,
-			err
-		);
-	}
-
-
-	inline td_api::object_ptr<td_api::user> getUser(int64_t user_id)
-	{
-		return td_->send_query_sync<td_api::getUser, td_api::user>(
-			td_api::make_object<td_api::getUser>(user_id),
-			query_sync_timeout
-		);
-	}
+private:
+	void waitForKWorker(void);
+	void putWq(uint32_t idx);
+	void putThPool(uint32_t idx);
+	int dispatchWq(uint32_t idx);
+	struct thpool *getThPool(void);
+	void threadPoolWrk(struct thpool *thpool);
 };
 
-
 } /* namespace tgvisd */
-
 
 #endif /* #ifndef TGVISD__KWORKER_HPP */

@@ -13,6 +13,10 @@
 #include <thread>
 #include <tgvisd/Td/Td.hpp>
 #include <tgvisd/common.hpp>
+#include <mysql/MySQL.hpp>
+#include <stack>
+
+#define NR_DB_POOL	128
 
 namespace tgvisd {
 
@@ -22,40 +26,53 @@ class Scraper;
 
 class KWorker;
 
+struct dbpool {
+	mysql::MySQL		db;
+	uint32_t		idx;
+};
 
 class Main
 {
 private:
-	tgvisd::Td::Td	td_;
-	volatile bool	isReady_ = false;
-	std::thread	*kworkerThread_ = nullptr;
-	std::thread	*scraperThread_ = nullptr;
-	KWorker		*kworker_ = nullptr;
-	Scraper		*scraper_ = nullptr;
+	tgvisd::Td::Td		td_;
+	volatile bool		isReady_ = false;
+	std::thread		*kworkerThread_ = nullptr;
+	std::thread		*scraperThread_ = nullptr;
+	KWorker			*kworker_ = nullptr;
+	Scraper			*scraper_ = nullptr;
+	struct dbpool		*dbPool_  = nullptr;
+	std::mutex		dbPoolStkLock_;
+	std::stack<uint32_t>	dbPoolStk_;
+
+	/* For MySQL. */
+	const char		*sqlHost_   = nullptr;
+	const char		*sqlUser_   = nullptr;
+	const char		*sqlPass_   = nullptr;
+	const char		*sqlDBName_ = nullptr;
+	uint16_t		sqlPort_    = 0u;
+
+	void initMySQLConfig(void);
+	bool initDbPool(void);
 
 public:
 	Main(uint32_t api_id, const char *api_hash, const char *data_path);
 	~Main(void);
 	int run(void);
 
+	inline static bool shouldStop(void)
+	{
+		return unlikely(stopEventLoop);
+	}
 
 	inline KWorker *getKWorker(void)
 	{
 		return kworker_;
 	}
 
-
 	inline void doStop(void)
 	{
 		stopEventLoop = true;
 	}
-
-
-	inline bool getStop(void)
-	{
-		return stopEventLoop;
-	}
-
 
 	inline bool isReady(void)
 	{
@@ -67,6 +84,10 @@ public:
 	{
 		return &td_;
 	}
+
+	void handleUpdateNewMessage(td_api::updateNewMessage &u);
+	void putDbPool(mysql::MySQL *db);
+	mysql::MySQL *getDBPool(void);
 };
 
 
