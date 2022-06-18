@@ -33,10 +33,12 @@ target_compile_options(tgvisdtd PRIVATE
 	-Wall
 	-Wextra
 	-Wpedantic
+	-march=native
+	-mtune=native
 	-Wno-unused-parameter
 	-fno-omit-frame-pointer
-	-fstack-protector-strong
-	-fsanitize=address
+	# -fstack-protector-strong
+	# -fsanitize=address
 	-Wno-gnu-statement-expression
 )
 ##################################################################
@@ -65,8 +67,8 @@ set(
 	# Logger/Sender/Chat.cpp
 	# Logger/Sender/User.hpp
 	# Logger/Sender/User.cpp
-	# Logger/Message.cpp
-	# Logger/Message.hpp
+	Logger/Message.cpp
+	Logger/Message.hpp
 	# Logger/SenderFoundation.cpp
 	# Logger/SenderFoundation.hpp
 
@@ -80,24 +82,26 @@ set(
 	mysql_helpers.cpp
 	print.c
 	print.h
-	Scraper.cpp
-	Scraper.hpp
+	# Scraper.cpp
+	# Scraper.hpp
 	KWorker.cpp
 	KWorker.hpp
 )
 
 add_executable(tgvisd ${TGVISD_SOURCE})
 set_property(TARGET tgvisd PROPERTY CXX_STANDARD 20)
-target_link_libraries(tgvisd PRIVATE asan tgvisdtd mysqlclient pthread)
+target_link_libraries(tgvisd PRIVATE tgvisdtd mysqlclient pthread)
 target_compile_options(tgvisd PRIVATE
 	-ggdb3
 	-Wall
 	-Wextra
 	-Wpedantic
+	-march=native
+	-mtune=native
 	-Wno-unused-parameter
 	-fno-omit-frame-pointer
-	-fstack-protector-strong
-	-fsanitize=address
+	# -fstack-protector-strong
+	# -fsanitize=address
 	-Wno-gnu-statement-expression
 )
 ##################################################################

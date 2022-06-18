@@ -14,6 +14,7 @@
 #include <tgvisd/Td/Td.hpp>
 #include <tgvisd/common.hpp>
 #include <mysql/MySQL.hpp>
+#include <unordered_map>
 #include <stack>
 
 #define NR_DB_POOL	128
@@ -44,6 +45,14 @@ private:
 	std::mutex		dbPoolStkLock_;
 	std::stack<uint32_t>	dbPoolStk_;
 
+	std::mutex					chatLockMapLock_;
+	std::unordered_map<int64_t, std::mutex *>	*chatLockMap_ = nullptr;
+	uint32_t					nrChatLockMap_ = 0;
+
+	std::mutex					userLockMapLock_;
+	std::unordered_map<uint64_t, std::mutex *>	*userLockMap_ = nullptr;
+	uint32_t					nrUserLockMap_ = 0;
+
 	/* For MySQL. */
 	const char		*sqlHost_   = nullptr;
 	const char		*sqlUser_   = nullptr;
@@ -55,6 +64,9 @@ private:
 	bool initDbPool(void);
 
 public:
+	std::mutex *getChatLock(int64_t tg_chat_id);
+	std::mutex *getUserLock(uint64_t tg_user_id);
+
 	Main(uint32_t api_id, const char *api_hash, const char *data_path);
 	~Main(void);
 	int run(void);

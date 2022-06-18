@@ -19,7 +19,7 @@ using namespace std::chrono_literals;
 #define	NR_MAX_THPOOL	64
 #define NR_MAX_WQ	512
 
-KWorker::KWorker(Main *main):
+__cold KWorker::KWorker(Main *main):
 	main_(main)
 {
 	uint32_t i;
@@ -38,7 +38,7 @@ KWorker::KWorker(Main *main):
 	}
 }
 
-KWorker::~KWorker(void)
+__cold KWorker::~KWorker(void)
 	__acquires(&wqStkLock_)
 	__releases(&wqStkLock_)
 	__acquires(&pendingWqLock_)
@@ -52,6 +52,17 @@ KWorker::~KWorker(void)
 	pendingWqLock_.lock();
 
 	if (wq_) {
+		while (!pendingWq_.empty()) {
+			struct wq *wq;
+			uint32_t idx;
+
+			idx = pendingWq_.front();
+			pendingWq_.pop();
+			pr_notice("Cancelling wq %u...", idx);
+			wq = &wq_[idx];
+			if (wq->data.user_data && wq->data.user_data_deleter)
+				wq->data.user_data_deleter(wq->data.user_data);
+		}
 		delete[] wq_;
 		wq_ = nullptr;
 	}
@@ -74,7 +85,7 @@ KWorker::~KWorker(void)
 	pendingWqLock_.unlock();
 }
 
-void KWorker::waitForKWorker(void)
+__cold void KWorker::waitForKWorker(void)
 {
 	while (1) {
 		uint32_t n = atomic_load(&NrThPoolOnline_);
@@ -94,12 +105,12 @@ int KWorker::scheduleWq(wq_f_t func, void *udata, wq_udata_del_f_t fdel)
 {
 	struct wq *wq;
 	uint32_t idx;
-	int ret;
+	int ret = -EOWNERDEAD;
+
+	if (shouldStop())
+		return ret;
 
 	wqStkLock_.lock();
-	ret = -EOWNERDEAD;
-	if (shouldStop())
-		goto out;
 	if (unlikely(!wq_))
 		goto out;
 	ret = -EAGAIN;
@@ -134,6 +145,7 @@ void KWorker::waitForFreeWqSlot(int timeout)
 	atomic_fetch_add(&nrFreeWqSlotRequests_, 1);
 	std::unique_lock lk(wqFreeLock_);
 	wqCondFree_.wait_for(lk, std::chrono::milliseconds(timeout));
+	lk.unlock();
 	atomic_fetch_sub(&nrFreeWqSlotRequests_, 1);
 }
 
@@ -235,9 +247,10 @@ struct thpool *KWorker::getThPool(void)
 	std::thread *t;
 	uint32_t idx;
 
-	thPoolStkLock_.lock();
 	if (shouldStop())
-		goto out;
+		return ret;
+
+	thPoolStkLock_.lock();
 	if (unlikely(thPool_ == nullptr || thPoolStk_.empty()))
 		goto out;
 	idx = thPoolStk_.top();
@@ -279,7 +292,7 @@ int KWorker::dispatchWq(uint32_t idx)
 	if (unlikely(!thpool))
 		return -EAGAIN;
 
-	assert(thpool->wq == nullptr);
+	assert(atomic_load(&thpool->wq) == nullptr);
 
 	wq = &wq_[idx];
 	wq->data.current = thpool;

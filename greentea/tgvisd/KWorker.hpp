@@ -26,12 +26,15 @@
 #include <queue>
 #include <mutex>
 
+#define THPOOL_STACK_SIZE (8192*1024)
+
 namespace tgvisd {
 
 struct wq;
 class KWorker;
 
 struct thpool {
+public:
 	std::condition_variable		cond;
 	std::mutex			mutex;
 	std::atomic<std::thread *>	thread;
@@ -39,6 +42,7 @@ struct thpool {
 	uint32_t			idx;
 	std::atomic<bool>		is_online = false;
 	bool				is_interruptible = true;
+	void				*ustack;
 
 	inline bool thpool_is_online(void)
 	{
