@@ -30,6 +30,23 @@ __cold Td::Td(uint32_t api_id, const char *api_hash, const char *data_path)
 	users_ = new __typeof__(*users_);
 }
 
+__cold Td::~Td(void)
+{
+	chat_title_lock_.lock();
+	if (chat_title_) {
+		delete chat_title_;
+		chat_title_ = nullptr;
+	}
+	chat_title_lock_.unlock();
+
+	users_lock_.lock();
+	if (users_) {
+		delete users_;
+		users_ = nullptr;
+	}
+	users_lock_.unlock();
+}
+
 __cold void Td::restart(void) noexcept
 {
 	client_manager_.reset();
@@ -56,6 +73,24 @@ __hot uint64_t Td::send_query(td_optr<td_api::Function> f,
 	return query_id;
 }
 
+__cold void Td::reclaim_map(void) noexcept
+{
+
+	chat_title_lock_.lock();
+	if (chat_title_ && chat_title_->size() > 1024) {
+		delete chat_title_;
+		chat_title_ = new __typeof__(*chat_title_);
+	}
+	chat_title_lock_.unlock();
+
+	users_lock_.lock();
+	if (users_ && users_->size() > 1024) {
+		delete users_;
+		users_ = new __typeof__(*users_);
+	}
+	users_lock_.unlock();
+}
+
 __hot void Td::loop(int timeout) noexcept
 {
 	if (unlikely(need_restart_)) {
@@ -64,6 +99,9 @@ __hot void Td::loop(int timeout) noexcept
 	}
 
 	process_response(client_manager_->receive(timeout));
+
+	if (atomic_fetch_add(&c_loop_, 1) % 4096 == 0)
+		reclaim_map();
 }
 
 __hot void Td::process_update(td_optr<td_api::Object> update) noexcept
@@ -75,17 +113,17 @@ __hot void Td::process_update(td_optr<td_api::Object> update) noexcept
 	};
 
 	auto u_new_chat = [this](td_api::updateNewChat &update) {
-		(*chat_title_)[update.chat_->id_] = update.chat_->title_;
+		set_chat_title(update.chat_->id_, update.chat_->title_);
 		callback.execute(update);
 	};
 
 	auto u_chat_title = [this](td_api::updateChatTitle &update) {
-		(*chat_title_)[update.chat_id_] = update.title_;
+		set_chat_title(update.chat_id_, update.title_);
 		callback.execute(update);
 	};
 
 	auto u_user = [this](td_api::updateUser &update) {
-		(*users_)[update.user_->id_] = std::move(update.user_);
+		set_user(update.user_->id_, std::move(update.user_));
 		callback.execute(update);
 	};
 

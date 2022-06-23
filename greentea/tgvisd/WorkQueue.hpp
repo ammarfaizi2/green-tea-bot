@@ -12,6 +12,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <condition_variable>
 
 struct wq_job_data {
@@ -19,10 +20,12 @@ struct wq_job_data {
 	struct wq_thread	*t;
 };
 
+typedef std::function<void(struct wq_job_data *data)> wq_job_callback_t;
+
 struct wq_job {
 	uint32_t		idx;
 	struct wq_job_data	data;
-	void			(*callback)(struct wq_job_data *data);
+	wq_job_callback_t	callback;
 };
 
 enum wq_thread_state {
@@ -203,12 +206,12 @@ public:
 		  uint32_t nr_idle_thread = -1U) noexcept;
 	int run(void) noexcept;
 	void wq_thread_worker(struct wq_thread *t) noexcept;
-	int64_t raw_schedule_work(void (*callback)(struct wq_job_data *data),
-				  void *data = NULL) noexcept;
-	int64_t schedule_work(void (*callback)(struct wq_job_data *data),
-			      void *data = NULL) noexcept;
-	int64_t try_schedule_work(void (*callback)(struct wq_job_data *data),
-				  void *data = NULL) noexcept;
+	int64_t raw_schedule_work(wq_job_callback_t callback, void *data = NULL)
+		noexcept;
+	int64_t schedule_work(wq_job_callback_t callback, void *data = NULL)
+		noexcept;
+	int64_t try_schedule_work(wq_job_callback_t callback, void *data = NULL)
+		noexcept;
 
 	inline void lock_work(void)
 	{

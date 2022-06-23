@@ -97,7 +97,7 @@ public:
 class Td {
 
 	typedef unordered_map<uint64_t, function<void(Object)>> handler_map_t;
-	typedef unordered_map<int32_t, td_optr<td_api::user>> user_map_t;
+	typedef unordered_map<int64_t, td_optr<td_api::user>> user_map_t;
 	typedef unordered_map<int64_t, string> chat_title_map_t;
 
 private:
@@ -108,10 +108,13 @@ private:
 
 	atomic<uint64_t> c_query_id_ = 0;
 	atomic<uint64_t> auth_query_id_ = 0;
+	atomic<uint32_t> c_loop_ = 0;
 
 	mutex handlers_lock_;
 	handler_map_t handlers_;
 
+	mutex chat_title_lock_;
+	mutex users_lock_;
 	chat_title_map_t *chat_title_ = nullptr;
 	user_map_t *users_ = nullptr;
 
@@ -136,13 +139,36 @@ private:
 	void process_update(td_optr<td_api::Object> update) noexcept;
 	function<void(Object object)> create_auth_query_handler(void) noexcept;
 	void check_authentication_error(Object object) noexcept;
+	void reclaim_map(void) noexcept;
 
 public:
 	Callback callback;
 
+	inline void set_chat_title(int64_t id, string title)
+	{
+		chat_title_lock_.lock();
+		if (unlikely(!chat_title_)) {
+			chat_title_lock_.unlock();
+			return;
+		}
+		(*chat_title_)[id] = title;
+		chat_title_lock_.unlock();
+	}
+
+	inline void set_user(int64_t id, td_optr<td_api::user> u)
+	{
+		users_lock_.lock();
+		if (unlikely(!users_)) {
+			users_lock_.unlock();
+			return;
+		}
+		(*users_)[id] = std::move(u);
+		users_lock_.unlock();
+	}
+
 	Td(uint32_t api_id, const char *api_hash, const char *data_path)
 		noexcept;
-	~Td(void) = default;
+	~Td(void);
 	uint64_t send_query(td_optr<td_api::Function> f,
 			    function<void(Object)> handler) noexcept;
 	void loop(int timeout) noexcept;

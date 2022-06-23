@@ -119,7 +119,7 @@ void WorkQueue::_wq_helper(uint32_t njob)
 
 	for (i = nr_idle_thread_; i < nr_threads_; i++) {
 		struct wq_thread *t = &threads_[i];
-		uint8_t s = atomic_load(&t->state);
+		uint8_t s = t->get_task_state();
 
 		if (s == WQ_ZOMBIE) {
 			t->thread->join();
@@ -218,8 +218,7 @@ int WorkQueue::run(void) noexcept
 	return ret;
 }
 
-int64_t WorkQueue::raw_schedule_work(void (*callback)(struct wq_job_data *data),
-				     void *data) noexcept
+int64_t WorkQueue::raw_schedule_work(wq_job_callback_t cb, void *data) noexcept
 	__must_hold(&jobs_lock_)
 {
 	struct wq_job *job;
@@ -231,17 +230,16 @@ int64_t WorkQueue::raw_schedule_work(void (*callback)(struct wq_job_data *data),
 	idx = free_job_idx_.pop();
 	job = &jobs_[idx];
 	job->data.data = data;
-	job->callback = callback;
+	job->callback = cb;
 	jobs_queue_.push(idx);
 	return (int64_t)idx;
 }
 
-int64_t WorkQueue::try_schedule_work(void (*callback)(struct wq_job_data *data),
-				     void *data) noexcept
+int64_t WorkQueue::try_schedule_work(wq_job_callback_t cb, void *data) noexcept
 {
 	int64_t idx;
 	jobs_lock_.lock();
-	idx = raw_schedule_work(callback, data);
+	idx = raw_schedule_work(cb, data);
 	jobs_lock_.unlock();
 	if (idx >= 0)
 		jobs_cond_.notify_one();
@@ -249,8 +247,7 @@ int64_t WorkQueue::try_schedule_work(void (*callback)(struct wq_job_data *data),
 }
 
 
-int64_t WorkQueue::schedule_work(void (*callback)(struct wq_job_data *data),
-				 void *data) noexcept
+int64_t WorkQueue::schedule_work(wq_job_callback_t cb, void *data) noexcept
 {
 	std::unique_lock<std::mutex> lk(sched_idle_lock_, std::defer_lock);
 	bool inc = false;
@@ -258,7 +255,7 @@ int64_t WorkQueue::schedule_work(void (*callback)(struct wq_job_data *data),
 
 	while (true) {
 
-		idx = try_schedule_work(callback, data);
+		idx = try_schedule_work(cb, data);
 		if (idx != -EAGAIN)
 			break;
 
