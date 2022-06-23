@@ -10,11 +10,12 @@
 #ifndef TGVISD__COMMON_HPP
 #define TGVISD__COMMON_HPP
 
-#include <cstdio>
-#include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <cstdbool>
+#include <stdio.h>
+#include <assert.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "compiler_attributes.h"
 
 #ifndef unlikely
 #  define unlikely(X) __builtin_expect((bool)(X), 0)

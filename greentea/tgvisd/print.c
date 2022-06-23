@@ -4,8 +4,7 @@
  */
 
 #include <stdarg.h>
-#include <teavpn2/print.h>
-#include <teavpn2/common.h>
+#include "print.h"
 
 #if defined(__linux__)
 	#include <pthread.h>

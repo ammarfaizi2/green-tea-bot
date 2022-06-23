@@ -12,7 +12,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
-#include <teavpn2/compiler_attributes.h>
+#include "common.h"
 
 extern uint8_t __notice_level;
 

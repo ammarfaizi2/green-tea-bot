@@ -12,7 +12,7 @@ cd td;
 rm -rf build;
 mkdir -pv build;
 cd build;
-CC=clang CXX=clang++ cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=../../build/tdlib ..;
+CC=clang CXX=clang++ cmake -DTD_ENABLE_LTO=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX:PATH=../../build/tdlib ..;
 VERBOSE=1 cmake --build . -j$(nproc);
 VERBOSE=1 cmake --build . --target install -j$(nproc);
 
